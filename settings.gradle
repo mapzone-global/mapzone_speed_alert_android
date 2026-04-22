@@ -1,0 +1,2 @@
+rootProject.name = 'mapzone-speed-alert'
+include ':speedalert'
