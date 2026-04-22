@@ -1,3 +1,3 @@
 install:
-  - FILE="-Dfile=speedalert/libs/mapzone-speed-alert-sdk-0.0.6.aar"
-  - mvn install:install-file $FILE -DgroupId=com.mapzone.android -DartifactId=mapzone-speed-alert -Dversion=0.0.6 -Dpackaging=aar -DpomFile=pom.xml
+  - FILE="-Dfile=speedalert/libs/mapzone-speed-alert-sdk-0.0.7.aar"
+  - mvn install:install-file $FILE -DgroupId=com.mapzone.android -DartifactId=mapzone-speed-alert -Dversion=0.0.7 -Dpackaging=aar -DpomFile=pom.xml
