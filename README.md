@@ -4,10 +4,21 @@
 
 ## Installation
 
-Add JitPack repository to your root `build.gradle`:
+Add JitPack repository to your root `build.gradle` or `settings.gradle`:
 
+**For build.gradle:**
 ```gradle
 allprojects {
+    repositories {
+        ...
+        maven { url 'https://jitpack.io' }
+    }
+}
+```
+
+**For settings.gradle (Gradle 7.0+):**
+```gradle
+dependencyResolutionManagement {
     repositories {
         ...
         maven { url 'https://jitpack.io' }
