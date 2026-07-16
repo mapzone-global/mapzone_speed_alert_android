@@ -6,22 +6,6 @@ This SDK is provided only for Vietmap MAPs API enterprise customers. Contact you
 
 ---
 
-## Requirements
-
-| | Minimum |
-|---|---|
-| `minSdk` | 21 (Android 5.0 Lollipop) |
-| `compileSdk` | 34 |
-| Java / Kotlin | Java 8 source / Kotlin 1.8+ |
-| ABIs | `armeabi-v7a`, `arm64-v8a`, `x86`, `x86_64` |
-| Page-size support | 16 KB-page devices (Android 15+) |
-| Network | HTTPS access to `*.map.zone` |
-| Location | GPS hardware required |
-
-> **Note:** The AAR ships prebuilt `.so` libraries — your project does not need the Android NDK to consume the SDK. NDK is only required if you rebuild from source.
-
----
-
 ## Installation
 
 ### 1. Add the JitPack repository
@@ -259,50 +243,6 @@ val parsed: VehicleType = VehicleType.fromValue(3)   // VehicleType.TRUCK
 
 ---
 
-## Voice Cues & Priority
-
-Each voice cue delivered to `VoiceCallback.onVoice(wavBytes, trigger, priority)` carries two integers.
-
-### Priority
-
-The built-in queue plays cues highest-priority-first; within one priority level it preserves travel order (nearest alert first). Under congestion (> ~6 s of pending audio) only `0` cues are dropped.
-
-| `priority` | Tier | Behaviour |
-|---|---|---|
-| `2` | Speeding | Most urgent — `"bạn đang vượt quá giới hạn tốc độ"`. Never skipped. |
-| `1` | Normal | Approaching speed limit, cameras, tolls, signs (travel order). Never skipped. |
-| `0` | Current | `"tốc độ giới hạn hiện tại …"` — stale-prone, dropped first when the queue is congested. |
-
-### `trigger`
-
-Identifies which cue fired, so a host can filter or substitute its own audio.
-
-| `trigger` | Name | Spoken phrase |
-|---|---|---|
-| `0` | None | — |
-| `1` | Speed changed | "tốc độ giới hạn hiện tại X km/h" |
-| `2` | Approaching speed | "tốc độ giới hạn tiếp theo X km/h" |
-| `3` | Camera ahead | "phía trước có camera theo dõi tốc độ" |
-| `4` | Toll ahead | "phía trước có trạm thu phí" |
-| `5` | Speeding | "bạn đang vượt quá giới hạn tốc độ" |
-| `6` | Traffic enforcement | "phía trước có camera phạt nguội" |
-| `7` | Red-light camera | "phía trước có camera giám sát" |
-| `8` | AI camera | "phía trước có camera giám sát" |
-| `9` | No left turn | "phía trước có biển báo cấm rẽ trái" |
-| `10` | No right turn | "phía trước có biển báo cấm rẽ phải" |
-| `11` | No U-turn | "phía trước có biển báo cấm quay đầu" |
-| `12` | No overtaking | "phía trước có biển báo cấm vượt" |
-| `13` | No-overtaking end | "kết thúc đoạn cấm vượt" |
-| `14` | No parking | "phía trước có biển báo cấm đỗ xe" |
-| `15` | No straight | "phía trước có biển báo cấm đi thẳng" |
-| `16` | Built-up area start | "phía trước có biển báo khu dân cư" |
-| `17` | Built-up area end | "phía trước có biển báo kết thúc khu dân cư" |
-| `18` | Rest station | "phía trước có trạm dừng nghỉ" |
-
-> **Note:** AI cameras (`trigger 8`) share the *"camera giám sát"* phrase with red-light cameras (`trigger 7`) — they remain distinct triggers but use the same audio clip.
-
----
-
 ## Error Codes (`ResultCallback.onResult`)
 
 | Code | Meaning |
@@ -344,8 +284,4 @@ All public methods are safe to call from the Android main thread. Callbacks alwa
 ---
 
 ## Demo 
-Check demo app at [Github](https://github.com/mapzone-global/mapzone-speed-alert-app-android)
-
-## License
-
-Proprietary — MapZone Global.
+Check demo app on [Github](https://github.com/mapzone-global/mapzone-speed-alert-app-android)
