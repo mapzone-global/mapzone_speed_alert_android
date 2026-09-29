@@ -1,8 +1,15 @@
-# MapZone Speed Alert Android SDK
+# MapZone Speed Alert SDK — Android
 
 [![](https://jitpack.io/v/mapzone-global/mapzone_speed_alert_android.svg)](https://jitpack.io/#mapzone-global/mapzone_speed_alert_android)
 
-This SDK is provided only for Vietmap MAPs API enterprise customers. Contact your Vietmap account manager for access or [Vietmap Solutions](https://zalo.me/3189066936017422854) Zalo OA if you are interested in becoming a customer.
+This SDK is provided only for Vietmap MAPs API enterprise customers. Contact your Vietmap [Vietmap Solutions](https://zalo.me/3189066936017422854) Zalo OA if you are interested in becoming a customer.
+
+**Zone-based speed alert — no route required.** You feed raw GPS frames; nothing
+else. The native engine fetches the road network around the vehicle from the
+MapZone service, map-matches every fix onto it, and hands you back speed-limit
+signs, upcoming camera / toll previews, restriction signs, and voice cues. There
+is no route to hand in and no reroute to handle: the driver can go anywhere and
+the engine follows.
 
 ---
 
@@ -43,27 +50,69 @@ dependencies {
 }
 ```
 
-Pick the version number from the JitPack badge at the top of this README.
+### 3. Requirements
 
-> **Note:** The AAR bundles its own native libraries. If your app also ships other native code, make sure your `packagingOptions` do not strip `lib/*/libmapzone_native.so`.
+| Setting | Value |
+|---|---|
+| `minSdk` | **21** or higher |
+| `compileSdk` | 34 or higher |
+| Java / Kotlin JVM target | **8** or higher (`sourceCompatibility` / `targetCompatibility` = `VERSION_1_8`) |
+| Native ABIs shipped | `arm64-v8a`, `armeabi-v7a` (16 KB page size supported) — **no x86/x86_64** |
+| R8 / ProGuard | Nothing to add — the AAR ships its own consumer rules |
 
----
+> **Emulators:** the AAR contains no x86_64 slice, so the standard Intel system
+> images cannot load the engine. Test on a physical device or on an **arm64
+> emulator image**. On an unsupported ABI the SDK stays inert and reports error
+> code `-5` (see Error Codes).
 
 ## Permissions
 
 ### `AndroidManifest.xml`
 
+The AAR declares exactly one permission — the engine only talks to the network:
+
 ```xml
+<!-- Declared by the AAR and merged into your manifest -->
 <uses-permission android:name="android.permission.INTERNET" />
-<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+```
+
+Everything else belongs in **your** manifest, because your app is the one that
+collects GPS: the SDK never touches the location APIs, it only consumes the
+coordinates you hand to `updateLocation` / `processGps`.
+
+```xml
+<!-- Add to your own manifest — required -->
 <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
-<!-- Only if you need speed alerts when the screen is off / app is backgrounded -->
+<!-- Only if you keep alerting while the app is in the background -->
 <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+
+<!-- Only if you run your GPS collection inside a foreground service -->
 <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+
+<!-- Only if that service posts a notification on Android 13+ (API 33) -->
+<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 ```
+
+> **⚠️ Upgrading from 2.0.1 — breaking change.** 2.0.1 declared the location,
+> foreground-service and wake-lock permissions inside the AAR, so manifest
+> merging handed them to your app whether you asked or not. 2.0.2 and later declare only
+> `INTERNET`. If you were relying on that merge and never declared the location
+> permissions yourself, your app loses them on upgrade and hits
+> `SecurityException` on the first GPS read — check your own manifest before
+> shipping.
+>
+> In exchange, `ACCESS_BACKGROUND_LOCATION` is no longer forced on you, so the
+> `tools:node="remove"` workaround the 2.0.1 guide recommended is obsolete.
+> Delete it if you have it, otherwise it will strip a permission you now declare
+> on purpose.
+
+> **Foreground service on Android 14+ (API 34+):** if you collect GPS from a
+> foreground service, declare it with `android:foregroundServiceType="location"`
+> and start it with the matching type. This is about your GPS collection, not
+> the SDK — the engine has no service of its own.
 
 ### Runtime permission request (Android 6.0+)
 
@@ -72,216 +121,313 @@ private val permissionLauncher = registerForActivityResult(
     ActivityResultContracts.RequestMultiplePermissions()
 ) { results ->
     val granted = results.values.all { it }
-    if (granted) startEngine() else showRationale()
+    if (granted) startTracking() else showRationale()
 }
 
 permissionLauncher.launch(
     arrayOf(
         Manifest.permission.ACCESS_FINE_LOCATION,
-        Manifest.permission.ACCESS_COARSE_LOCATION,
-        Manifest.permission.ACCESS_BACKGROUND_LOCATION   // request *after* FINE/COARSE
+        Manifest.permission.ACCESS_COARSE_LOCATION
     )
 )
 ```
-
-> **Note:** On Android 10+ (API 29+), `ACCESS_BACKGROUND_LOCATION` must be requested in a **separate** prompt *after* the user has already granted `ACCESS_FINE_LOCATION`. The system silently denies otherwise. On Android 14+ (API 34+), declare `FOREGROUND_SERVICE_LOCATION` if the engine runs inside a foreground service.
 
 ---
 
 ## Quick Integration — `ZoneNetworkManager`
 
-`ZoneNetworkManager` is the only public entry point. It owns the engine and serialises all GPS / network work on an internal background executor — the public API is safe to call from the main thread.
+`ZoneNetworkManager` is the only public entry point. It owns the native engine
+and serialises all zone / GPS work on an internal single-thread executor — the
+public API is safe to call from the main thread, and all callbacks arrive back
+on the main thread.
 
 ### 1. Create and configure
 
-```kotlin
-import map.zone.speedalertsdk.ZoneNetworkManager
-import map.zone.speedalertsdk.VehicleType
+Call `configure(...)` **before the first GPS frame**.
 
-val zoneManager = ZoneNetworkManager(
-    /* baseUrl     */ "https://driving.map.zone",     // endpoint
-    /* apiKeyId    */ "<your-api-key-id>",            // issued by Vietmap
-    /* apiKey      */ "<your-api-key>",               // issued by Vietmap
-    /* bundleId    */ packageName,                    // typically context.getPackageName()
-    /* vehicleId   */ "<your-vehicle-id>",            // issued by Vietmap
-    /* vehicleType */ VehicleType.TRUCK.value,        // see Vehicle Types table below
-    /* seats       */ 4,
-    /* weights     */ 3500.0                          // gross weight in kg
-)
+```java
+import map.zone.speedalertsdk.ZoneNetworkManager;
+
+ZoneNetworkManager manager = new ZoneNetworkManager();
+
+manager.configure(
+        /* baseUrl     */ "https://driving.map.zone",   // MapZone service base URL
+        /* apiKeyId    */ "<your-api-key-id>",          // issued by Vietmap
+        /* apiKey      */ "<your-api-key>",             // issued by Vietmap
+        /* vehicleId   */ "<your-vehicle-id>",          // issued by Vietmap
+        /* vehicleType */ 1,                            // 1..9 (see Vehicle Types)
+        /* seats       */ 1,                            // seats — filters applicable alerts
+        /* weights     */ 1.0);                         // gross weight in kg — filters applicable alerts
 ```
 
-> **Note:** Treat `apiKey` as a credential. Do not log it, embed it in a public repo, or expose it in user-facing UI. The constructor throws `IllegalArgumentException` if `baseUrl` does not start with `https://`.
+Everything that fails *after* configuration is reported through
+`ResultCallback` as a numeric code, never as an exception.
+
+> **Note:** Treat `apiKey` as a credential — do not log it, commit it to a public
+> repo, or expose it in user-facing UI.
+>
+> **Bundle id / allow-listing:** you do **not** pass a bundle id. The SDK resolves
+> your app's *installed* `applicationId` automatically (via an auto-installed
+> `ContentProvider`) and sends it as the auth bundle id — **including any
+> `applicationIdSuffix` or flavor suffix** (e.g. `com.foo.debug`). The auth server
+> accepts a single exact application id and does **not** whitelist suffixed
+> variants. Register the exact `applicationId` of every build you ship with the
+> Vietmap team, or build those variants without a suffix.
+
+**Optional configuration** (safe to call at any time, including mid-session):
+
+| Method | Purpose |
+|---|---|
+| `setMutedAlertTypes(VoiceAlertType...)` | Mute specific alert voices (camera, toll, restriction signs, …). Speed-limit & speeding voices can never be muted. Call with no arguments to re-enable all. Persists across zone reloads. |
+| `setMutedAlertTypes(Set<VoiceAlertType>)` | Same, taking a set. `null` or empty re-enables all. |
+| `setLogFilePath(String)` | Append native engine logs to a file for field reports. **Debug builds only** — returns `false` and writes nothing on the release AAR. |
+| `getLogFilePath()` / `flushLog()` | Read the current log path / flush before sharing the file. |
 
 ### 2. Register callbacks
 
-All four callbacks fire on the main thread. Wire only the ones you need.
+All callbacks fire on the main thread. Wire only the ones you need.
 
-```kotlin
-// (a) Engine ready — fires after each successful zone load.
-zoneManager.setReadyCallback { isReady, linkCount, alertCount ->
-    Log.d(TAG, "ready=$isReady, links=$linkCount, alerts=$alertCount")
-}
+```java
+// (a) Per-tick speed signs — the core driver of your UI.
+manager.setBitmapCallback((currentBmp, speedStatus,
+                           nextBmp,    nextDistMeters,
+                           cameraBmp,  cameraDistMeters,
+                           tollBmp,    tollDistMeters,
+                           voiceWav) -> {
 
-// (b) Network result — surfaces server errors. errorCode == 0 means success.
-zoneManager.setResultCallback { success, errorCode, errorMessage ->
+    // Current speed-limit sign (null = no speed limit on the matched road).
+    ivSpeedSign.setImageBitmap(currentBmp);
+
+    // Overspeed indicator: 0 = within limit, 1 = within 5 km/h of it, 2 = over limit.
+    statusBar.setBackgroundColor(
+        speedStatus == 2 ? Color.parseColor("#F44336") :   // red
+        speedStatus == 1 ? Color.parseColor("#FF9800") :   // orange
+                           Color.parseColor("#4CAF50"));    // green
+
+    // Upcoming sign / camera / toll previews. Hide the slot when the bitmap is null.
+    bindMiniSign(ivNext,   nextBmp,   nextDistMeters);
+    bindMiniSign(ivCamera, cameraBmp, cameraDistMeters);
+    bindMiniSign(ivToll,   tollBmp,   tollDistMeters);
+
+    // voiceWav: legacy parameter, always null in this version — voice is
+    // delivered through the built-in player / VoiceCallback instead.
+});
+
+// (b) Zone loaded — fires after each successful fetch of the surrounding network.
+manager.setReadyCallback((isReady, linkCount, alertCount) -> {
+    statusLabel.setText("ready: " + linkCount + " links, " + alertCount + " alerts");
+});
+
+// (c) Fetch outcome — surfaces server and local errors. errorCode == 0 means success.
+manager.setResultCallback((success, errorCode, errorMessage) -> {
     if (!success && errorCode != 0) {
-        Log.w(TAG, "error code=$errorCode: $errorMessage")
+        Log.w(TAG, "zone load failed code=" + errorCode + ": " + errorMessage);
     }
-}
-
-// (c) Per-tick bitmaps + first voice clip — the core driver of your UI.
-zoneManager.setBitmapCallback { currentBmp, speedStatus,
-                                nextBmp,    nextDistMeters,
-                                cameraBmp,  cameraDistMeters,
-                                tollBmp,    tollDistMeters,
-                                voiceWav ->
-
-    // Current speed-limit sign (null = matcher has no link under GPS).
-    binding.ivSpeedSign.setImageBitmap(currentBmp)
-
-    // Overspeed indicator: 0 = safe, 1 = approaching limit, 2 = over limit.
-    binding.statusBar.setBackgroundColor(when (speedStatus) {
-        1    -> Color.parseColor("#FF9800")    // orange
-        2    -> Color.parseColor("#F44336")    // red
-        else -> Color.parseColor("#4CAF50")    // green
-    })
-
-    // Upcoming sign / camera / toll. Hide the container when bitmap == null.
-    bindMiniSign(binding.flNextSign,   binding.ivNext,   binding.tvNext,   nextBmp,   nextDistMeters)
-    bindMiniSign(binding.flCameraSign, binding.ivCamera, binding.tvCamera, cameraBmp, cameraDistMeters)
-    bindMiniSign(binding.flTollSign,   binding.ivToll,   binding.tvToll,   tollBmp,   tollDistMeters)
-
-    // voiceWav is null when nothing is queued. See the voice note below.
-}
+});
 ```
 
-> **Note (voice):** The Android SDK has a **built-in, priority-aware `MediaPlayer` queue** that plays voice cues automatically. The engine can emit several cues per GPS tick; the SDK orders them by **priority** (urgent first) and, within the same priority, by **travel order** (nearest first). When the pending backlog grows beyond ~6 s, the lowest-priority *"tốc độ giới hạn hiện tại"* cues are dropped so timely alerts are never delayed — higher-priority cues are never skipped.
+> **Important:** `onBitmap` fires only on GPS frames the matcher could place on a
+> road. When the vehicle is off-network (parking garage, brand-new road, GPS
+> spike) no callback arrives at all — your last sign stays on screen. If that
+> matters for your UI, clear the slots yourself after N seconds without a
+> callback.
+
+**Restriction signs** are delivered through three independent callbacks, because
+they answer different questions and genuinely co-occur — a street inside a
+built-up area can also ban stopping:
+
+```
+  access │ đường cấm, cấm loại xe  │ may I drive here at all?
+  stop   │ cấm dừng, cấm đỗ        │ may I stop here?
+  bua    │ khu dân cư              │ what speed regime applies?
+```
+
+Give each its own display slot; one firing says nothing about the other two.
+
+```java
+manager.setAccessRestrictionCallback((bmp, kind, distMeters) -> {
+    // kind: 0 = none (hide the slot), 3 = đường cấm, 4 = cấm loại xe
+    bindSignSlot(accessSlot, bmp, kind, distMeters);
+});
+
+manager.setStopRestrictionCallback((bmp, kind, distMeters) -> {
+    // kind: 0 = none, 1 = cấm đỗ, 2 = cấm dừng
+    // Only raised while the driver is actually slowing down or stopped.
+    bindSignSlot(stopSlot, bmp, kind, distMeters);
+});
+
+manager.setBuildupAreaCallback((bmp, kind, distMeters) -> {
+    // kind: 0 = none, 5 = khu dân cư, 6 = hết khu dân cư
+    // Artwork is a landscape rectangle, not a circle — size the slot for it.
+    bindSignSlot(buaSlot, bmp, kind, distMeters);
+});
+```
+
+Each group fires **only when it changes** — not on every GPS frame. `distMeters == 0`
+means "you are on it now" (hide the distance label); `> 0` means it starts that
+far ahead. A `null` bitmap with a non-zero `kind` means the artwork for that sign
+is not embedded yet — hide the slot, never treat it as an error.
+
+> **Note (voice):** The Android SDK has a **built-in, priority-aware
+> `MediaPlayer` queue** that plays voice cues automatically. You do not have to
+> wire anything.
 >
-> You only need to register a `VoiceCallback` if you want to mix audio yourself, route it to a specific stream, or apply your own prioritisation. Each cue carries its `trigger` and `priority`:
+> Register a `VoiceCallback` only if you want to mix audio yourself, route it to
+> a specific stream, or apply your own prioritisation:
 >
-> ```kotlin
-> zoneManager.setVoiceCallback(object : VoiceCallback {
->     // Richer variant — the SDK always calls this one. Cues arrive already
->     // ordered (priority desc, then nearest first).
->     override fun onVoice(wavBytes: ByteArray, trigger: Int, priority: Int) {
+> ```java
+> manager.setVoiceCallback(new VoiceCallback() {
+>     // Richer variant — the SDK always calls this one.
+>     @Override public void onVoice(byte[] wavBytes, int trigger, int priority) {
 >         // priority: 0 = "hiện tại" (lowest, skipped first when congested)
->         //           1 = normal (approaching / camera / sign)
+>         //           1 = normal (approaching / camera / toll / sign)
 >         //           2 = speeding (most urgent)
->         // trigger:  see the VoiceTrigger table below
->         myCustomPlayer.enqueue(wavBytes, priority)
+>         // trigger:  native VoiceTrigger value (see Voice Alert Types)
+>         myPlayer.enqueue(wavBytes, priority);
 >     }
->
->     // Legacy single-arg variant — still required by the interface; the
->     // two-arg default forwards here, so existing code keeps working.
->     override fun onVoice(wavBytes: ByteArray) = myCustomPlayer.enqueue(wavBytes, 1)
-> })
-> // Once a callback is set, the built-in player is disabled and the app becomes
-> // responsible for ALL voice playback (including the voiceWav from onBitmap).
-> // Pass null to restore default playback.
+>     // Legacy single-arg variant — still part of the interface; the two-arg
+>     // default forwards here, so existing code keeps working.
+>     @Override public void onVoice(byte[] wavBytes) { myPlayer.enqueue(wavBytes, 1); }
+> });
+> // Once a callback is set, the built-in player is disabled and your app becomes
+> // responsible for ALL voice playback. Pass null to restore the default player.
 > ```
 >
-> Existing single-arg lambdas (`setVoiceCallback { wavBytes -> ... }`) still compile and run — the two-arg method has a default that forwards to `onVoice(byte[])`, so you only adopt the richer signature when you need `trigger` / `priority`.
->
-> WAV format: PCM 16-bit little-endian, mono, 22 050 Hz — ready for `MediaPlayer`, `AudioTrack`, or `ExoPlayer`.
+> WAV format: PCM 16-bit little-endian, mono, 22 050 Hz — ready for
+> `MediaPlayer`, `AudioTrack`, or `ExoPlayer`.
 
-### 3. Feed GPS updates
+### 3. Feed GPS
 
-Call both APIs on every GPS frame. The engine throttles HTTP fetches internally — calling at 1 Hz when the vehicle hasn't moved costs nothing.
+Every GPS frame goes through **two** calls, in this order:
+
+```
+  Location fix
+       │
+       ├─► updateLocation(...)   keeps the loaded road network around the vehicle
+       │                          (fetches from the server only when needed)
+       │
+       └─► processGps(...)        matches the fix, renders signs, fires voice
+```
 
 ```kotlin
 private val locationListener = LocationListener { loc ->
-    val lat      = loc.latitude
-    val lng      = loc.longitude
-    val bearing  = if (loc.hasBearing()) loc.bearing.toDouble() else 0.0
-    val speedKmh = if (loc.hasSpeed()) loc.speed * 3.6 else 0.0    // Location.speed is m/s
-    val accuracy = loc.accuracy.toDouble()
+    val speedKmh = if (loc.hasSpeed()) loc.speed * 3.6 else 0.0   // Location.speed is m/s
+    val hasBearing = loc.hasBearing()
+    val bearing = if (hasBearing) loc.bearing.toDouble() else 0.0
 
-    // (a) Refresh zone cache. Returns immediately; HTTP happens on a background queue.
-    zoneManager.updateLocation(lat, lng, speedKmh, bearing)
+    // 1) Keep the zone around the vehicle fresh.
+    //    Double.NaN here means "heading unknown" — the engine then skips the
+    //    forward projection instead of aiming the request at a made-up heading.
+    manager.updateLocation(loc.latitude, loc.longitude, speedKmh,
+        if (hasBearing) bearing else Double.NaN)
 
-    // (b) Drive the per-tick UI: bitmaps, speed status, voice cues.
-    zoneManager.processGps(lat, lng, bearing, speedKmh, accuracy)
+    // 2) Drive the per-tick UI.
+    manager.processGps(
+        loc.latitude,
+        loc.longitude,
+        bearing,                  // degrees, 0 = N, 90 = E — never NaN
+        speedKmh,                 // km/h — the SDK converts to m/s internally
+        loc.accuracy.toDouble(),  // horizontal accuracy in metres
+        loc.time)                 // fix timestamp, ms since epoch (UTC)
 }
-
-locationManager.requestLocationUpdates(
-    LocationManager.GPS_PROVIDER, /* minTimeMs */ 1000L, /* minDistanceM */ 2f, locationListener
-)
 ```
-
-> **Note:** Pass *snapped-to-route* coordinates here if your app already runs map-matched navigation (e.g. VietmapNavigation `SnapToRoute`) — raw `Location` samples can be 10-20 m off the road centre even with good `accuracy`, which causes the matcher to pick the wrong link.
-
 ### 4. Reset
 
 ```kotlin
-zoneManager.reset()    // clears loaded zone data; next updateLocation() refetches
+manager.reset()    // clears loaded zone data + engine state
 ```
 
-Call this when the driver swaps `vehicleType` / `seats` / `weights`, or at the end of a navigation session if you want to free engine memory immediately.
+Call this when the vehicle profile changes (driver swaps `vehicleType` / `seats`
+/ `weights` — re-`configure` afterwards) or when the session ends and you want
+the memory back. The next `updateLocation` triggers a fresh fetch.
+
+---
+
+## Voice Alert Types (mute control)
+
+Pass the categories you want to **mute** to `setMutedAlertTypes(...)`; everything
+not listed keeps announcing. Speed-limit and speeding warnings are core safety
+cues and can never be muted — they have no entry in the enum.
+
+Muting a **camera or toll** category also hides its on-screen icon. The other
+categories currently have no icon, so muting them only silences the voice.
+
+```java
+import map.zone.speedalertsdk.VoiceAlertType;
+
+// Mute camera + toll voices; keep every other voice and all visual signs.
+manager.setMutedAlertTypes(VoiceAlertType.SPEED_CAMERA, VoiceAlertType.TOLL);
+
+// Re-enable all voices:
+manager.setMutedAlertTypes();
+```
+
+| `VoiceAlertType` | Trigger | Meaning |
+|---|---|---|
+| `SPEED_CAMERA` | 3 | Speed camera |
+| `TOLL` | 4 | Toll booth |
+| `TRAFFIC_ENFORCEMENT_CAMERA` | 6 | Traffic-enforcement camera (phạt nguội) |
+| `RED_LIGHT_CAMERA` | 7 | Red-light / surveillance camera |
+| `AI_CAMERA` | 8 | AI camera |
+| `NO_LEFT_TURN` / `NO_RIGHT_TURN` / `NO_UTURN` / `NO_STRAIGHT` | 9 / 10 / 11 / 15 | Turn restrictions |
+| `NO_OVERTAKING` / `NO_OVERTAKING_END` | 12 / 13 | No-overtaking zone start / end |
+| `NO_PARKING` | 14 | Cấm đỗ |
+| `BUILDUP_AREA_START` / `BUILDUP_AREA_END` | 16 / 17 | Built-up area (khu dân cư) start / end |
+| `REST_STATION` | 18 | Rest station |
+| `NO_STOPPING` | 19 | Cấm dừng |
+| `ROAD_CLOSED` | 20 | Đường cấm |
+| `VEHICLE_RESTRICTED` | 21 | Cấm loại xe đang cấu hình |
 
 ---
 
 ## Vehicle Types
 
-Use the `VehicleType` enum or pass the raw integer value.
+`configure(...)` takes a raw integer `vehicleType` in **1..9**. The
+`VehicleType` enum in the SDK carries the same values plus display names.
 
-| Enum | `value` | Description |
-|---|---|---|
-| `VehicleType.CAR` | 1 | Xe ô tô |
-| `VehicleType.MOTORCYCLE` | 2 | Xe mô tô |
-| `VehicleType.TRUCK` | 3 | Xe tải — supported for speed alerts |
-| `VehicleType.COACH` | 4 | Xe khách |
-| `VehicleType.BUS` | 5 | Xe bus |
-| `VehicleType.TAXI` | 6 | Xe taxi |
-| `VehicleType.BICYCLE` | 7 | Xe đạp |
-| `VehicleType.PEDESTRIAN` | 8 | Người đi bộ |
-| `VehicleType.EMERGENCY` | 9 | Xe ưu tiên |
+| `vehicleType` | Description |
+|---|---|
+| `1` | Car (xe ô tô) |
+| `2` | Motorcycle (xe mô tô) |
+| `3` | Truck (xe tải) |
+| `4` | Coach (xe khách) |
+| `5` | Bus (xe bus) |
+| `6` | Taxi (xe taxi) |
+| `7` | Bicycle (xe đạp) |
+| `8` | Pedestrian (người đi bộ) |
+| `9` | Emergency (xe ưu tiên) |
 
-```kotlin
-val vt: Int = VehicleType.TRUCK.value          // 3
-val parsed: VehicleType = VehicleType.fromValue(3)   // VehicleType.TRUCK
-```
+`vehicleType` also selects which "cấm loại xe" artwork the access-restriction
+callback renders.
 
 ---
 
 ## Error Codes (`ResultCallback.onResult`)
 
+`errorMessage` is a short, display-ready English sentence derived from
+`errorCode` **alone** — the server's own wording never reaches your app.
+Localise off the numeric code if you need another language, and quote the number
+in bug reports.
+
 | Code | Meaning |
 |---|---|
-| `0` | Success (zone loaded) |
-| `1001` | Invalid parameter (check `vehicleId`, `seats`, `weights`) |
-| `2003` | Unauthorized — `apiKeyId` / `apiKey` / `bundleId` mismatch |
-| `3003` | Vehicle type not supported for this account |
-| negative values | Local SDK failure (network unreachable, parse error) |
+| `0` | Success — zone data loaded |
+| `1001` | This location is outside the supported area |
+| `1000`–`1999` | The request was invalid |
+| `2000`–`2999` | Session expired / unauthorized — `apiKeyId`, `apiKey`, or application id mismatch |
+| `3003` | Vehicle type not supported (must be `1..9`) |
+| `3004` | No map data found for this area |
+| `3000`–`3999` | Requested data not found |
+| `5000`–`5999` | Server temporarily unavailable |
+| `-1` | Response could not be verified |
+| `-2` | Map data empty, malformed, or unusable |
+| `-3` | Secure session could not be established |
+| `-4` | Server unreachable — check connectivity |
+| `-5` | Native bridge failed — library missing for this device's ABI, a bridge call threw, or JNI could not marshal the result back to Java. Reported **once per outage**, not on every GPS tick. |
+| `-99` | Legacy spelling of `-5`, emitted by older engine builds. Same meaning, same message. |
 
 ---
 
-## Threading Model
+## Demo
 
-```
- Main thread ──► updateLocation / processGps
-                          │
-                          ▼
-              Internal single-thread ExecutorService
-              (HTTP + matching + bitmap render)
-                          │
-                          ▼
-              Main thread ◄── ReadyCallback / ResultCallback /
-                              BitmapCallback / VoiceCallback
-```
-
-All public methods are safe to call from the Android main thread. Callbacks always arrive back on the main thread via the application's `Handler(Looper.getMainLooper())`, so you can update views directly without `runOnUiThread {}`.
-
----
-
-## Troubleshooting
-
-- **No bitmaps and `ReadyCallback` never fires:** check `ResultCallback` — a non-zero `errorCode` tells you whether it is an auth issue (2003), a parameter issue (1001), or a network failure (negative code).
-- **`UnsatisfiedLinkError` for `libmapzone_native.so`:** your app's `packagingOptions` is stripping the SDK's native libs, or your `abiFilters` excludes the device ABI. Add the full set `armeabi-v7a`, `arm64-v8a`, `x86`, `x86_64`.
-- **Wrong sign shown on the wrong road:** pass map-matched coordinates instead of raw GPS (see step 3 note).
-- **Voice doesn't stop when the app goes to background:** the default `MediaPlayer` queue keeps playing on the music stream. Either set a `VoiceCallback` and gate playback yourself, or call `zoneManager.setVoiceCallback(null)` after the lifecycle event you want to honour.
-- **Crash on Android 14 background service start:** add `FOREGROUND_SERVICE_LOCATION` to your manifest and start the service with the matching `foregroundServiceType`.
-
----
-
-## Demo 
-Check demo app on [Github](https://github.com/mapzone-global/mapzone-speed-alert-app-android)
+Check the demo app on [GitHub](https://github.com/mapzone-global/mapzone-speed-alert-app-android).
